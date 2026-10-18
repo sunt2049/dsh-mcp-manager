@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "MCP 控制台",
+    "description": "列出 profile 里的 MCP 服务器，按服务器展开实时工具清单与完整 JSON Schema，并可经 configEditor 直接修改活跃配置条目。"
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "MCP Console",
+    "description": "Lists the profile's MCP servers with a live per-server tool inventory, full JSON Schemas, and direct edits of the active config entries through configEditor."
+  }
+}
