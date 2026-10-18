@@ -62,6 +62,7 @@ window.__ModuleLoader__.load({
     }
 
     function statusOf(server) {
+      if (server.mounted === false) return { color: C.warn, label: '尚未挂载' }
       if (!server.transport) return { color: C.err, label: '配置不完整' }
       if (!server.tools.length) return { color: C.warn, label: '无工具' }
       return { color: C.ok, label: '已注册' }
@@ -494,8 +495,35 @@ window.__ModuleLoader__.load({
             ),
             h('button', { style: S.btn, onClick: props.onCancel, disabled: busy }, '取消'),
           ),
-          h(Notice, null, '新行会追加到 profile patch 末尾；写入后需要重启 DSH 才会挂载。'),
+          h(Notice, null, '新行会追加到 profile patch 末尾，保存后通常几秒内自动挂载。'),
         ),
+      )
+    }
+
+    const PAGE_SIZES = [5, 10, 20, 50, 100]
+    const AUTO_REFRESH_MS = 4000
+
+    /** `1 … 4 5 6 … 20` — a window around the current page plus both ends. */
+    function pageItems(current, total) {
+      const items = [1]
+      const start = Math.max(2, current - 1)
+      const end = Math.min(total - 1, current + 1)
+      if (start > 2) items.push('…')
+      for (let page = start; page <= end; page += 1) items.push(page)
+      if (end < total - 1) items.push('…')
+      if (total > 1) items.push(total)
+      return items
+    }
+
+    function pageButton(label, enabled, onClick) {
+      return h(
+        'button',
+        {
+          style: { ...S.btn, padding: '2px 8px', fontSize: '12px', opacity: enabled ? 1 : 0.45 },
+          disabled: !enabled,
+          onClick,
+        },
+        label,
       )
     }
 
@@ -504,6 +532,23 @@ window.__ModuleLoader__.load({
       const open = props.open
       const status = statusOf(server)
       const removable = server.inPatch
+      const [page, setPage] = useState(1)
+      const [pageSize, setPageSize] = useState(PAGE_SIZES[0])
+      const [toolQuery, setToolQuery] = useState('')
+
+      const tools = useMemo(() => {
+        const needle = toolQuery.trim().toLowerCase()
+        if (!needle) return server.tools
+        return server.tools.filter(
+          (tool) =>
+            tool.wire.toLowerCase().includes(needle) || tool.description.toLowerCase().includes(needle),
+        )
+      }, [server.tools, toolQuery])
+
+      const totalPages = Math.max(1, Math.ceil(tools.length / pageSize))
+      const current = Math.min(page, totalPages)
+      const from = (current - 1) * pageSize
+      const visible = tools.slice(from, from + pageSize)
 
       return h(
         'div',
@@ -526,6 +571,7 @@ window.__ModuleLoader__.load({
                 'div',
                 { style: S.meta },
                 h('span', null, 'id: ' + server.id),
+                server.mounted === false ? h('span', null, '（已写入，等待挂载…）') : null,
                 server.cwd ? h('span', null, 'cwd: ' + server.cwd) : null,
                 server.toolCallTimeoutMs === null
                   ? null
@@ -566,24 +612,145 @@ window.__ModuleLoader__.load({
                             )
                           : null,
                   )
-                : server.tools.map((tool) =>
-                    h(
-                      'div',
-                      { key: tool.name },
-                      h(
-                        'button',
-                        { style: S.tool, onClick: () => props.onToggleTool(tool.name) },
-                        h('span', { style: S.toolName }, tool.wire),
-                        h('span', { style: S.toolDesc, title: tool.description }, tool.description || '（无描述）'),
-                        h('span', { style: { color: C.dim, fontSize: '11px' } }, props.openTool === tool.name ? '收回' : '参数'),
-                      ),
-                      props.openTool === tool.name ? h(SchemaBlock, { entry: props.schemas[tool.name] }) : null,
-                    ),
-                  ),
+                : [
+                    server.tools.length > 12
+                      ? h('input', {
+                          key: 'tool-filter',
+                          style: { ...S.input, margin: '2px 8px 6px' },
+                          placeholder: '在本服务器的 ' + server.tools.length + ' 个工具里筛选…',
+                          value: toolQuery,
+                          onChange: (event) => {
+                            setToolQuery(event.target.value)
+                            setPage(1)
+                          },
+                          spellCheck: false,
+                        })
+                      : null,
+                    tools.length === 0
+                      ? h('div', { key: 'no-match', style: S.empty }, '没有匹配的工具。')
+                      : visible.map((tool) =>
+                          h(
+                            'div',
+                            { key: tool.name },
+                            h(
+                              'button',
+                              { style: S.tool, onClick: () => props.onToggleTool(tool.name) },
+                              h('span', { style: S.toolName }, tool.wire),
+                              h(
+                                'span',
+                                { style: S.toolDesc, title: tool.description },
+                                tool.description || '（无描述）',
+                              ),
+                              h(
+                                'span',
+                                { style: { color: C.dim, fontSize: '11px' } },
+                                props.openTool === tool.name ? '收回' : '参数',
+                              ),
+                            ),
+                            props.openTool === tool.name
+                              ? h(SchemaBlock, { entry: props.schemas[tool.name] })
+                              : null,
+                          ),
+                        ),
+                    tools.length > 0
+                      ? h(
+                          'div',
+                          {
+                            key: 'pager',
+                            style: {
+                              ...S.row,
+                              gap: '4px',
+                              padding: '8px 8px 2px',
+                              borderTop: `1px solid ${C.border}`,
+                              marginTop: '6px',
+                            },
+                          },
+                          h(
+                            'span',
+                            { style: { color: C.dim, fontSize: '11.5px' } },
+                            '共 ' + tools.length + ' 个',
+                          ),
+                          h('span', { style: S.spacer }),
+                          totalPages > 1
+                            ? h(
+                                React.Fragment,
+                                null,
+                                pageButton('首页', current > 1, () => setPage(1), S),
+                                pageButton('上一页', current > 1, () => setPage(current - 1), S),
+                                pageItems(current, totalPages).map((item, index) =>
+                                  item === '…'
+                                    ? h(
+                                        'span',
+                                        {
+                                          key: 'gap' + index,
+                                          style: { color: C.dim, padding: '0 3px', fontSize: '12px' },
+                                        },
+                                        '…',
+                                      )
+                                    : h(
+                                        'button',
+                                        {
+                                          key: 'p' + item,
+                                          style: {
+                                            ...S.btn,
+                                            padding: '2px 8px',
+                                            minWidth: '26px',
+                                            fontSize: '12px',
+                                            ...(item === current
+                                              ? {
+                                                  borderColor: C.brand,
+                                                  color: C.brand,
+                                                  fontWeight: 700,
+                                                  textDecoration: 'underline',
+                                                }
+                                              : {}),
+                                          },
+                                          onClick: () => setPage(item),
+                                        },
+                                        String(item),
+                                      ),
+                                ),
+                                pageButton('下一页', current < totalPages, () => setPage(current + 1), S),
+                                pageButton('尾页', current < totalPages, () => setPage(totalPages), S),
+                              )
+                            : null,
+                          h(
+                            'span',
+                            { style: { color: C.dim, fontSize: '11.5px', marginLeft: '6px' } },
+                            '每页',
+                          ),
+                          h(
+                            'select',
+                            {
+                              style: { ...S.btn, padding: '1px 4px', fontSize: '11.5px' },
+                              value: String(pageSize),
+                              onChange: (event) => {
+                                setPageSize(Number(event.target.value))
+                                setPage(1)
+                              },
+                            },
+                            PAGE_SIZES.map((size) => h('option', { key: size, value: String(size) }, String(size))),
+                          ),
+                          h('span', { style: { color: C.dim, fontSize: '11.5px' } }, '个'),
+                        )
+                      : null,
+                  ],
               h(
                 'div',
                 { style: { ...S.row, padding: '8px 6px 2px' } },
-                h('button', { style: S.btn, onClick: props.onEdit }, props.editing ? '正在编辑' : '编辑配置'),
+                h(
+                  'button',
+                  {
+                    style: S.btn,
+                    onClick: props.onEdit,
+                    disabled: server.mounted === false,
+                    title:
+                      server.mounted === false
+                        ? '这一行还没挂载，configEditor 改不到它；等它挂上（通常几秒）再编辑'
+                        : '通过 configEditor 修改，即时生效',
+                  },
+                  props.editing ? '正在编辑' : '编辑配置',
+                ),
                 h('button', { style: S.btn, onClick: () => copyText(endpointOf(server)) }, '复制端点'),
                 h(
                   'button',
@@ -646,22 +813,41 @@ window.__ModuleLoader__.load({
       const [confirmId, setConfirmId] = useState(null)
       const [busyId, setBusyId] = useState(null)
       const [probes, setProbes] = useState({})
+      const [auto, setAuto] = useState(true)
+      const [syncedAt, setSyncedAt] = useState(null)
+      const inflight = React.useRef(false)
 
-      const refresh = useCallback(async () => {
-        setLoading(true)
+      const refresh = useCallback(async (silent) => {
+        if (inflight.current) return
+        inflight.current = true
+        if (!silent) setLoading(true)
         const result = await getJson('/mcp-manager/overview')
-        setLoading(false)
+        inflight.current = false
+        if (!silent) setLoading(false)
         if (!result || !result.ok) {
-          setFailure((result && result.error) || '读取失败')
+          // A background tick must not wipe a working panel over one bad read.
+          if (!silent) setFailure((result && result.error) || '读取失败')
           return
         }
         setFailure(null)
         setData(result)
+        setSyncedAt(new Date())
       }, [])
 
       useEffect(() => {
-        refresh()
+        refresh(false)
       }, [refresh])
+
+      // The Loader applies patch edits through HMR within a few seconds, so the
+      // panel re-reads on its own instead of making the user hunt for 刷新.
+      useEffect(() => {
+        if (!auto) return undefined
+        const timer = setInterval(() => {
+          if (document.hidden) return
+          refresh(true)
+        }, AUTO_REFRESH_MS)
+        return () => clearInterval(timer)
+      }, [auto, refresh])
 
       const runProbe = useCallback(async (server) => {
         setProbes((prev) => ({ ...prev, [server.id]: { state: 'running' } }))
@@ -792,13 +978,33 @@ window.__ModuleLoader__.load({
               ? '读取中…'
               : data
                 ? data.serverTotal + ' 个服务器 · ' + data.toolTotal + ' 个工具' +
-                  (parked.length ? ' · ' + parked.length + ' 个已停用' : '')
+                  (parked.length ? ' · ' + parked.length + ' 个已停用' : '') +
+                  (syncedAt ? ' · 已同步 ' + syncedAt.toLocaleTimeString('zh-CN', { hour12: false }) : '')
                 : '未获取到数据',
           ),
         ),
         h('span', { style: S.spacer }),
         h('button', { style: S.btn, onClick: () => setAdding((v) => !v) }, adding ? '收起添加' : '+ 添加'),
-        h('button', { style: S.btn, onClick: refresh, disabled: loading }, loading ? '刷新中…' : '刷新'),
+        h(
+          'label',
+          {
+            style: { ...S.btn, display: 'inline-flex', alignItems: 'center', gap: '5px', cursor: 'pointer' },
+            title: 'HMR 会在几秒内应用 patch 改动，自动刷新让你不用手动点',
+          },
+          h('input', {
+            type: 'checkbox',
+            checked: auto,
+            onChange: (event) => setAuto(event.target.checked),
+            style: { margin: 0 },
+          }),
+          '自动刷新',
+          h(
+            'span',
+            { style: { color: C.dim, fontSize: '11px' } },
+            auto ? '（' + AUTO_REFRESH_MS / 1000 + 's）' : '',
+          ),
+        ),
+        h('button', { style: S.btn, onClick: () => refresh(false), disabled: loading }, loading ? '刷新中…' : '刷新'),
         h('button', { style: S.btn, onClick: exportJson }, '复制 JSON'),
       )
 
@@ -836,7 +1042,7 @@ window.__ModuleLoader__.load({
           ? h(
               Notice,
               null,
-              '已写入 profile patch：增删停用的改动要重启 DSH 才会生效（“编辑配置”走 configEditor，是即时生效的）。',
+              '已写入 profile patch：HMR 通常几秒内自动生效。若长时间停在“尚未挂载”，才需要重启 DSH。',
             )
           : null
 
@@ -871,6 +1077,7 @@ window.__ModuleLoader__.load({
                   editing: editingId === server.id,
                   confirm: confirmId === server.id,
                   busy: busyId === server.id,
+                  searched: query.trim() !== '',
                   probe: probes[server.id],
                   onProbe: () => runProbe(server),
                   onToggle: () => toggleServer(server),
@@ -906,7 +1113,7 @@ window.__ModuleLoader__.load({
                   h('span', { style: { ...S.dot, background: C.idle } }),
                   h('span', { style: S.name }, item.serverName || item.id),
                   h(Chip, null, item.transport || '—'),
-                  item.stillMounted ? h(Chip, null, '进程内仍挂着 · 重启后卸载') : null,
+                  item.stillMounted ? h(Chip, null, '进程内仍挂着 · 待卸载') : null,
                   h('span', { style: S.endpoint, title: item.url }, item.url || item.id),
                   h('span', { style: S.spacer }),
                   h('span', { style: { color: C.dim, fontSize: '11.5px' } }, item.savedAt ? item.savedAt.slice(0, 19).replace('T', ' ') : ''),

@@ -18,8 +18,7 @@
  *   POST /mcp-manager/rows       add / remove / disable / enable a patch row
  */
 
-import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createConnection } from 'node:net'
 import { dirname, resolve } from 'node:path'
 import {
@@ -54,9 +53,6 @@ const EDITABLE = new Set([
 /** Set once this process writes a patch row; a restart clears it. */
 let rowsTouchedAt = null
 
-/** The document as this process loaded it; a restart resets it. */
-let bootDocumentHash = null
-
 function asObject(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : {}
 }
@@ -68,11 +64,6 @@ function text(value) {
 function clip(value, limit) {
   const body = text(value).replace(/\s+/g, ' ').trim()
   return body.length > limit ? `${body.slice(0, limit - 1)}…` : body
-}
-
-/** Content identity of the patch document, so "待重启" tracks the file, not intent. */
-function documentHash(source) {
-  return createHash('sha256').update(source, 'utf8').digest('hex')
 }
 
 function sendJson(response, status, payload) {
@@ -160,11 +151,23 @@ function readDocument(patchPath) {
   return { blocks, lossless: serializePatch(blocks) === source }
 }
 
+/**
+ * Write the document **in place**. The Loader's HMR watcher holds the file's
+ * handle: writing a temp file and renaming it over the original replaces that
+ * handle, so the watcher never fires and the change silently waits for a
+ * restart. Writing through the same path keeps the watcher alive and the new
+ * composition is applied within a few seconds.
+ */
 function writeDocument(patchPath, blocks) {
   const body = serializePatch(blocks)
   const tmp = `${patchPath}.mcp-manager.tmp`
   writeFileSync(tmp, body, 'utf8')
-  renameSync(tmp, patchPath)
+  writeFileSync(patchPath, body, 'utf8')
+  try {
+    unlinkSync(tmp)
+  } catch {
+    /* the temp file is only a crash breadcrumb */
+  }
 }
 
 /** Profile rows whose plugin is the official MCP client. */
@@ -231,6 +234,69 @@ function readServers(ctx, patchIds) {
 
   out.servers.sort((a, b) => a.serverName.localeCompare(b.serverName))
   return out
+}
+
+/**
+ * Every server the panel shows: the mounted rows, plus the document's MCP rows
+ * that the Loader has not applied yet. `configuration()` lags a write by a
+ * moment, so the two views disagree briefly after add/enable; every consumer
+ * (list, probe) must read this one.
+ */
+function readAllServers(ctx, patchPath) {
+  let patchRows = []
+  try {
+    for (const block of parsePatch(readFileSync(patchPath, 'utf8'))) {
+      if (block.kind === 'text') continue
+      for (const row of block.rows) if (row.id) patchRows.push(row)
+    }
+  } catch {
+    patchRows = []
+  }
+
+  const patchIds = new Set(patchRows.map((row) => row.id))
+  const { servers, error } = readServers(ctx, patchIds)
+  const mountedById = new Map(servers.map((server) => [server.patchId, server]))
+  const merged = []
+  const placed = new Set()
+
+  for (const row of patchRows) {
+    const live = mountedById.get(row.id)
+    if (live) {
+      placed.add(row.id)
+      merged.push({ ...live, mounted: true })
+      continue
+    }
+    const info = describeRow(row.lines)
+    // The profile patch also holds every other plugin's row; only the MCP
+    // client's rows are servers.
+    if (info.name !== MCP_PLUGIN && !info.serverName) continue
+    placed.add(row.id)
+    merged.push({
+      id: row.id,
+      patchId: row.id,
+      serverName: info.serverName,
+      transport: info.transport,
+      url: info.url,
+      command: info.command,
+      args: [],
+      cwd: '',
+      envKeys: [],
+      headerKeys: [],
+      toolCallTimeoutMs: null,
+      failOnStartupError: false,
+      disabled: false,
+      inPatch: true,
+      /** In the document, not loaded by this process yet. */
+      mounted: false,
+      editable: {},
+    })
+  }
+
+  for (const server of servers) {
+    if (!placed.has(server.patchId)) merged.push({ ...server, mounted: true })
+  }
+
+  return { merged, servers, error }
 }
 
 /** `mcp__<server>__<tool>` grouped by server, with descriptions only. */
@@ -469,14 +535,6 @@ export function apply(ctx) {
   ctx.inject(['webServer', 'tools', 'configEditor'], (hostCtx) => {
     const routes = []
 
-    // What this process actually loaded, so "待重启" cannot be triggered by a
-    // change that ended up byte-identical to the document on disk.
-    try {
-      bootDocumentHash = documentHash(readFileSync(hostCtx.configEditor.documentPath, 'utf8'))
-    } catch {
-      bootDocumentHash = null
-    }
-
     routes.push(hostCtx.webServer.register({
       kind: 'exact',
       path: '/mcp-manager/overview',
@@ -488,19 +546,7 @@ export function apply(ctx) {
         }
         try {
           const patchPath = hostCtx.configEditor.documentPath || ''
-          let patchIds = new Set()
-          let currentHash = null
-          if (patchPath) {
-            try {
-              const source = readFileSync(patchPath, 'utf8')
-              currentHash = documentHash(source)
-              if (bootDocumentHash === null) bootDocumentHash = currentHash
-              patchIds = new Set(rowIds(parsePatch(source)))
-            } catch {
-              patchIds = new Set()
-            }
-          }
-          const { servers, error } = readServers(hostCtx, patchIds)
+          const { merged, servers, error } = readAllServers(hostCtx, patchPath)
           const groups = readToolGroups(hostCtx)
           const parked = readParked(patchPath)
           const parkedIds = new Set(Object.keys(parked))
@@ -508,7 +554,7 @@ export function apply(ctx) {
           // A parked row is still mounted until the host restarts, but the user
           // already said "off": keep it out of the active list and let the parked
           // entry report that the running process still has it.
-          const active = servers.filter((server) => !parkedIds.has(server.patchId))
+          const active = merged.filter((server) => !parkedIds.has(server.patchId))
           const withTools = active.map((server) => ({
             ...server,
             tools: groups.get(server.serverName) || [],
@@ -534,8 +580,8 @@ export function apply(ctx) {
             parked: parkedList,
             toolTotal,
             serverTotal: withTools.length,
-            pendingRestart:
-              currentHash !== null && bootDocumentHash !== null && currentHash !== bootDocumentHash,
+            /** True only while a document row has not been applied yet. */
+            pendingRestart: withTools.some((server) => server.mounted === false),
             rowsTouchedAt,
             generatedAt: new Date().toISOString(),
           })
@@ -595,14 +641,15 @@ export function apply(ctx) {
         }
         try {
           const patchPath = hostCtx.configEditor.documentPath || ''
-          const { servers } = readServers(hostCtx, new Set())
+          const { merged } = readAllServers(hostCtx, patchPath)
           sendJson(response, 200, {
             ok: true,
             patchPath,
             generatedAt: new Date().toISOString(),
             parked: readParked(patchPath),
-            servers: servers.map((server) => ({
+            servers: merged.map((server) => ({
               id: server.id,
+              mounted: server.mounted,
               inPatch: server.inPatch,
               config: server.editable,
             })),
@@ -802,12 +849,19 @@ export function apply(ctx) {
         try {
           const body = await readBody(request)
           const id = text(body && body.id)
-          const { servers } = readServers(hostCtx, new Set())
-          const server = servers.find((row) => row.id === id || row.serverName === id)
+          const patchPath = hostCtx.configEditor.documentPath || ''
+          // Same view the list uses: a row enabled a moment ago is in the
+          // document but not yet reported by `configuration()`, and its id is
+          // still the patch id rather than the loader entry id.
+          const { merged } = readAllServers(hostCtx, patchPath)
+          const server = merged.find(
+            (row) => row.id === id || row.patchId === id || row.serverName === id,
+          )
           if (!server) {
             sendJson(response, 404, { ok: false, error: `找不到服务器 ${id}` })
             return
           }
+          const pendingNote = server.mounted === false ? '（尚未挂载，按 patch 里的配置判断） · ' : ''
 
           if (server.transport === 'streamable-http') {
             if (!server.url) {
@@ -820,7 +874,7 @@ export function apply(ctx) {
                 ok: true,
                 serverName: server.serverName,
                 verdict: 'port-closed',
-                detail: tcp.detail,
+                detail: pendingNote + tcp.detail,
                 ms: tcp.ms,
               })
               return
@@ -830,7 +884,7 @@ export function apply(ctx) {
               ok: true,
               serverName: server.serverName,
               verdict: http.reachable ? 'handshake-ok' : 'handshake-failed',
-              detail: http.detail,
+              detail: pendingNote + http.detail,
               status: http.status ?? null,
               contentType: http.contentType ?? null,
               tcp: tcp.detail,
@@ -845,7 +899,7 @@ export function apply(ctx) {
               ok: true,
               serverName: server.serverName,
               verdict: stdio.reachable ? 'files-ok' : 'files-missing',
-              detail: stdio.detail,
+              detail: pendingNote + stdio.detail,
               ms: 0,
             })
             return

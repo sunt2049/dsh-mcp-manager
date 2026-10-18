@@ -264,12 +264,18 @@ export function buildRowLines(id, config) {
   return lines
 }
 
-/** Read `serverName` / `transport` out of a stored row's YAML lines. */
+/** Read the shape of a row out of its YAML lines. */
 export function describeRow(lines) {
   const text = Array.isArray(lines) ? lines.join('\n') : String(lines || '')
   const pick = (key) => {
     const match = new RegExp(`^\\s+${key}:\\s*(.+?)\\s*$`, 'm').exec(text)
     return match ? match[1].replace(/^['"]|['"]$/g, '') : ''
   }
-  return { serverName: pick('serverName'), transport: pick('transport'), url: pick('url') }
+  return {
+    name: pick('name'),
+    serverName: pick('serverName'),
+    transport: pick('transport'),
+    url: pick('url'),
+    command: pick('command'),
+  }
 }
