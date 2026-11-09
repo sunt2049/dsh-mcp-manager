@@ -35,6 +35,9 @@ import {
 const MCP_PLUGIN = '@deepseek-ai/dsh-mcp-client'
 const SERVER_NAME = /^[A-Za-z0-9_-]{1,32}$/
 
+/** RFC 7230 token, the only thing a header name may contain. */
+const HEADER_NAME = /^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/
+
 /** Config keys this console is willing to write back through configEditor. */
 const EDITABLE = new Set([
   'serverName',
@@ -376,6 +379,18 @@ function readNewServer(input) {
       return out
     }
     next.url = url
+    const headers = asObject(config.headers)
+    const names = Object.keys(headers)
+    if (names.length > 0) {
+      next.headers = {}
+      for (const name of names) {
+        if (!HEADER_NAME.test(name)) {
+          out.error = `请求头名不合法：${name}`
+          return out
+        }
+        if (typeof headers[name] === 'string') next.headers[name] = headers[name]
+      }
+    }
   } else {
     const command = text(config.command).trim()
     if (!command) {
@@ -692,7 +707,21 @@ export function apply(ctx) {
           }
           await hostCtx.configEditor.edit(entry, (current) => {
             const next = { ...asObject(current) }
-            for (const key of Object.keys(clean)) next[key] = clean[key]
+            for (const key of Object.keys(clean)) {
+              if (key === 'headers') continue
+              next[key] = clean[key]
+            }
+            // The panel never reads header values back, so a header patch is a
+            // set of writes and deletes merged over what the row already has.
+            // An empty string deletes that header.
+            if (clean.headers) {
+              const merged = { ...asObject(next.headers) }
+              for (const [name, value] of Object.entries(clean.headers)) {
+                if (value === '') delete merged[name]
+                else merged[name] = value
+              }
+              next.headers = merged
+            }
             return next
           })
           sendJson(response, 200, { ok: true, id, applied: Object.keys(clean), live: true })

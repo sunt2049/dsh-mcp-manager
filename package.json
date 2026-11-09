@@ -1,6 +1,6 @@
 {
   "name": "@sunt2049/dsh-mcp-manager",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "type": "module",
   "description": "MCP 控制台：一个 profile 里所有 MCP 服务器的总览、实时工具清单与完整 JSON Schema、连通性探测，以及增删/停用与配置编辑。",
   "keywords": [

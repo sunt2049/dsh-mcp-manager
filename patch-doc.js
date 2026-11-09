@@ -241,6 +241,12 @@ export function buildRowLines(id, config) {
 
   if (config.transport === 'streamable-http') {
     field('url', quote(config.url))
+    const headers = config.headers && typeof config.headers === 'object' ? config.headers : {}
+    const names = Object.keys(headers)
+    if (names.length > 0) {
+      lines.push('        headers:')
+      for (const name of names) lines.push(`          ${name}: ${quote(headers[name])}`)
+    }
   } else {
     field('command', quote(config.command))
     const args = Array.isArray(config.args) ? config.args : []

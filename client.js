@@ -80,6 +80,21 @@ window.__ModuleLoader__.load({
       return env
     }
 
+    /** `Name: Value` per line; the first colon separates, so values may contain colons. */
+    function parseHeaders(text) {
+      const headers = {}
+      for (const raw of String(text || '').split('\n')) {
+        const line = raw.trim()
+        if (!line || line.startsWith('#')) continue
+        const cut = line.indexOf(':')
+        if (cut <= 0) continue
+        const name = line.slice(0, cut).trim()
+        const value = line.slice(cut + 1).trim()
+        if (name && value) headers[name] = value
+      }
+      return headers
+    }
+
     function verdictLabel(verdict) {
       switch (verdict) {
         case 'port-closed':
@@ -275,6 +290,8 @@ window.__ModuleLoader__.load({
       return h('div', { style: S.field }, h('span', { style: S.label }, label), control)
     }
 
+    const HEADER_NAME = /^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/
+
     function EditForm(props) {
       const server = props.server
       const isHttp = server.transport === 'streamable-http'
@@ -285,6 +302,8 @@ window.__ModuleLoader__.load({
         server.toolCallTimeoutMs === null ? '' : String(server.toolCallTimeoutMs),
       )
       const [failFast, setFailFast] = useState(server.failOnStartupError === true)
+      const [headerRows, setHeaderRows] = useState([{ name: '', value: '' }])
+      const [dropped, setDropped] = useState([])
       const [busy, setBusy] = useState(false)
       const [failure, setFailure] = useState(null)
 
@@ -304,6 +323,19 @@ window.__ModuleLoader__.load({
             return
           }
           patch.url = url.trim()
+
+          const headers = {}
+          for (const name of dropped) headers[name] = ''
+          for (const row of headerRows) {
+            const name = row.name.trim()
+            if (!name) continue
+            if (!HEADER_NAME.test(name)) {
+              setFailure(`请求头名不合法：${name}`)
+              return
+            }
+            headers[name] = row.value
+          }
+          if (Object.keys(headers).length > 0) patch.headers = headers
         } else {
           if (!command.trim()) {
             setFailure('command 不能为空')
@@ -324,7 +356,7 @@ window.__ModuleLoader__.load({
           return
         }
         props.onSaved()
-      }, [argsText, command, failFast, isHttp, props, timeout, url])
+      }, [argsText, command, dropped, failFast, headerRows, isHttp, props, timeout, url])
 
       return h(
         'div',
@@ -356,6 +388,88 @@ window.__ModuleLoader__.load({
                 }),
               ),
             ),
+        isHttp
+          ? field(
+              '请求头（可选，同名覆盖；清空值不影响已有值）',
+              h(
+                'div',
+                null,
+                (server.headerKeys || []).length > 0
+                  ? h(
+                      'div',
+                      { style: { ...S.row, gap: '5px', flexWrap: 'wrap', marginBottom: '6px' } },
+                      (server.headerKeys || []).map((name) =>
+                        dropped.includes(name)
+                          ? h(
+                              'button',
+                              {
+                                key: name,
+                                style: { ...S.btn, padding: '1px 7px', fontSize: '11.5px', textDecoration: 'line-through', opacity: 0.55 },
+                                title: '撤销删除',
+                                onClick: () => setDropped((prev) => prev.filter((item) => item !== name)),
+                              },
+                              name,
+                            )
+                          : h(
+                              'button',
+                              {
+                                key: name,
+                                style: { ...S.btn, padding: '1px 7px', fontSize: '11.5px' },
+                                title: '点击标记删除',
+                                onClick: () => setDropped((prev) => [...prev, name]),
+                              },
+                              name,
+                              h('span', { style: { color: C.dim, marginLeft: '4px' } }, '×'),
+                            ),
+                      ),
+                    )
+                  : null,
+                headerRows.map((row, index) =>
+                  h(
+                    'div',
+                    { key: 'h' + index, style: { ...S.row, gap: '5px', marginBottom: '4px' } },
+                    h('input', {
+                      style: { ...S.input, flex: '0 0 38%' },
+                      placeholder: 'Header 名',
+                      value: row.name,
+                      spellCheck: false,
+                      onChange: (event) =>
+                        setHeaderRows((prev) =>
+                          prev.map((item, at) => (at === index ? { ...item, name: event.target.value } : item)),
+                        ),
+                    }),
+                    h('input', {
+                      style: { ...S.input, flex: '1 1 auto' },
+                      placeholder: '值',
+                      value: row.value,
+                      spellCheck: false,
+                      onChange: (event) =>
+                        setHeaderRows((prev) =>
+                          prev.map((item, at) => (at === index ? { ...item, value: event.target.value } : item)),
+                        ),
+                    }),
+                    h(
+                      'button',
+                      {
+                        style: S.btn,
+                        onClick: () => setHeaderRows((prev) => prev.filter((_, at) => at !== index)),
+                        title: '移除此行',
+                      },
+                      '×',
+                    ),
+                  ),
+                ),
+                h(
+                  'button',
+                  {
+                    style: { ...S.btn, marginTop: '2px' },
+                    onClick: () => setHeaderRows((prev) => [...prev, { name: '', value: '' }]),
+                  },
+                  '+ 添加请求头',
+                ),
+              ),
+            )
+          : null,
         field(
           'toolCallTimeoutMs（留空表示用默认 60000）',
           h('input', {
@@ -372,8 +486,8 @@ window.__ModuleLoader__.load({
           h('input', { type: 'checkbox', checked: failFast, onChange: (e) => setFailFast(e.target.checked) }),
           '连接失败时拒绝激活（failOnStartupError）',
         ),
-        server.envKeys.length || server.headerKeys.length
-          ? h(Notice, null, 'env / headers 的值不在页面回显，以免泄露密钥；这两项请直接改 patch。')
+        server.envKeys.length
+          ? h(Notice, null, 'env 的值不在页面回显，以免泄露密钥；要改 env 请直接改 patch。')
           : null,
         failure ? h(Notice, { error: true }, failure) : null,
         h(
@@ -396,14 +510,18 @@ window.__ModuleLoader__.load({
       const [command, setCommand] = useState('')
       const [argsText, setArgsText] = useState('')
       const [envText, setEnvText] = useState('')
+      const [headersText, setHeadersText] = useState('')
       const [timeout, setTimeoutMs] = useState('')
       const [busy, setBusy] = useState(false)
       const [failure, setFailure] = useState(null)
 
       const submit = useCallback(async () => {
         const server = { serverName: serverName.trim(), transport }
-        if (transport === 'streamable-http') server.url = url.trim()
-        else {
+        if (transport === 'streamable-http') {
+          server.url = url.trim()
+          const headers = parseHeaders(headersText)
+          if (Object.keys(headers).length > 0) server.headers = headers
+        } else {
           server.command = command.trim()
           server.args = argsText.split('\n').map((line) => line.trim()).filter(Boolean)
           const env = parseEnv(envText)
@@ -419,7 +537,7 @@ window.__ModuleLoader__.load({
           return
         }
         props.onDone()
-      }, [argsText, command, envText, props, serverName, timeout, transport, url])
+      }, [argsText, command, envText, headersText, props, serverName, timeout, transport, url])
 
       const isHttp = transport === 'streamable-http'
       return h(
@@ -447,7 +565,21 @@ window.__ModuleLoader__.load({
             ),
           ),
           isHttp
-            ? field('url', h('input', { style: S.input, value: url, onChange: (e) => setUrl(e.target.value), spellCheck: false }))
+            ? h(
+                React.Fragment,
+                null,
+                field('url', h('input', { style: S.input, value: url, onChange: (e) => setUrl(e.target.value), spellCheck: false })),
+                field(
+                  'headers（每行 Name: Value，可留空）',
+                  h('textarea', {
+                    style: { ...S.input, minHeight: '58px', resize: 'vertical' },
+                    value: headersText,
+                    onChange: (e) => setHeadersText(e.target.value),
+                    spellCheck: false,
+                    placeholder: 'Authorization: Bearer xxx',
+                  }),
+                ),
+              )
             : h(
                 React.Fragment,
                 null,
